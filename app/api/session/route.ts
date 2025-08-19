@@ -19,7 +19,6 @@ export async function GET() {
       session = await prisma.session.create({
         data: {
           name: "My Notebook",
-          description: "This is my notebook",
         },
       });
     }
