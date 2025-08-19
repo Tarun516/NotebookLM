@@ -1,0 +1,51 @@
+generator client {
+  provider = "prisma-client-js"
+  output   = "../app/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+model Session {
+  id        String   @id @default(uuid())
+  name      String   @unique
+  sources   Source[]
+  chats     Chat[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Source {
+  id        String        @id @default(uuid())
+  name      String
+  type      String
+  sessionId String
+  session   Session       @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  chunks    SourceChunk[]
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+}
+
+model SourceChunk {
+  id        String                @id @default(uuid())
+  sourceId  String
+  source    Source                @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  content   String
+  embedding Unsupported("vector")
+  metadata  Json?
+  createdAt DateTime              @default(now())
+  updatedAt DateTime              @updatedAt
+}
+
+model Chat {
+  id        String   @id @default(uuid())
+  sessionId String
+  session   Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  role      String
+  message   String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
