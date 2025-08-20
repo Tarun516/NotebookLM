@@ -645,8 +645,6 @@ async function processStreamingQuery({
   }
 }
 
-export { processStreamingQuery };
-
 async function processNonStreamingQuery({
   sessionId,
   query,
