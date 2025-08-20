@@ -89,6 +89,12 @@ An AI-powered document notebook built with **Next.js, LangChain, and Prisma**. U
 # Install dependencies
 npm install
 
+# Setup env variables
+DATABASE_URL = ""
+DIRECT_URL = ""
+GEMINI_API_KEY=""
+GROQ_API_KEY = ""
+
 # Setup database
 npx prisma migrate dev --name init
 
