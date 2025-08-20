@@ -1,36 +1,99 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# 📘 NotebookLM (Custom RAG-Powered Notebook)
 
-## Getting Started
+An AI-powered document notebook built with **Next.js, LangChain, and Prisma**. Upload documents, add sources, and chat with them using Retrieval-Augmented Generation (RAG).
 
-First, run the development server:
+---
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+## 🚀 Features
+
+* 📂 **Multi-source ingestion** – Upload **PDF, TXT, CSV**, or provide **URLs** for web crawling & indexing.
+* 🔍 **Smart retrieval** – Embeddings-based semantic search across all or selected sources.
+* 💬 **Interactive chat** – Ask questions and get contextual answers, citations, and suggested follow-ups.
+* ⚡ **Streaming responses** – Real-time AI responses with typing indicators.
+* 📑 **Citations & references** – Clickable citations for source traceability.
+* 🛠 **Modern stack** – Next.js 15, Prisma + PostgreSQL (pgvector), LangChain, React Query, Tailwind.
+
+---
+
+## 🏗 High-Level Design (HLD)
+
+```
+         ┌───────────────┐
+         │   Frontend    │
+         │ (Next.js App) │
+         └───────┬───────┘
+                 │
+     ┌───────────▼───────────┐
+     │     API Layer (app/)   │
+     │  - /api/session        │
+     │  - /api/sources        │
+     │  - /api/chats          │
+     │  - /api/query          │
+     └───────────┬───────────┘
+                 │
+     ┌───────────▼───────────┐
+     │     Backend Logic      │
+     │  - Ingestion (PDF/CSV/URL)
+     │  - Embeddings (pgvector)  
+     │  - LLM (Groq/Google GenAI)
+     │  - Query Processing + RAG  
+     └───────────┬───────────┘
+                 │
+         ┌───────▼────────┐
+         │  Database      │
+         │ (Postgres +    │
+         │   Prisma ORM)  │
+         └────────────────┘
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+* **Frontend (React/Next.js)** – Sidebar for sources, chat panel, streaming responses.
+* **APIs** – REST endpoints for session mgmt, source ingestion, chat logs, and querying.
+* **Vector DB (pgvector)** – Stores embeddings for semantic search.
+* **LLM Layer** – Uses LangChain + Groq/Google APIs for query answering.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+---
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## 🔎 Low-Level Design (LLD)
 
-## Learn More
+### Key Components
 
-To learn more about Next.js, take a look at the following resources:
+* **`Sidebar.tsx`** – Manages sources (select all, add new, toggle filters).
+* **`ChatPanel.tsx`** – Displays messages, citations, follow-ups, and handles streaming queries.
+* **`AddSourceModal.tsx`** – Handles uploads (PDF, TXT, CSV) and web URLs.
+* **`useNotebook.ts` (hooks)** – React Query hooks for fetching chats, sessions, and sources.
+* **`lib/ingest.ts`** – Parsing & chunking of PDF/CSV/TXT, embeddings creation.
+* **`lib/llm.ts`** – LLM client (Groq, Google GenAI).
+* **`lib/responseProcessor.ts`** – Enhances answers, formats citations, generates follow-ups.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+### Database (Prisma schema)
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+* **Session** – Represents a notebook.
+* **Source** – Uploaded file or URL.
+* **SourceChunk** – Chunked embeddings.
+* **Chat** – Stores user + assistant messages with citations.
 
-## Deploy on Vercel
+---
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## 🔮 Future Scope
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+* 👤 **Personal Accounts** – Add authentication & multi-user support.
+* 🗂 **User-owned Notebooks** – Allow multiple notebooks per user (e.g., "Work", "Research").
+* 📝 **Custom prompts** – Users define their own query strategies.
+* ☁️ **Cloud Sync** – Store notebooks securely across devices.
+
+---
+
+## ⚡ Getting Started
+
+```bash
+# Install dependencies
+npm install
+
+# Setup database
+npx prisma migrate dev --name init
+
+# Run dev server
+npm run dev
+```
+
+App will be live at **[http://localhost:3000](http://localhost:3000)**.
