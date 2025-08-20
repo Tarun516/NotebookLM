@@ -4,7 +4,13 @@ import { useState } from "react";
 import { useGetSession, useGetSources } from "@/hooks/useNotebook";
 import AddSourceModal from "./AddSourceModal";
 
-export default function Sidebar() {
+export default function Sidebar({
+  onSelectSource,
+  onSessionReady,
+}: {
+  onSelectSource: (sourceId: string, sessionId: string) => void;
+  onSessionReady?: (sessionId: string) => void;
+}) {
   const [open, setOpen] = useState(false);
   const { data: session, isLoading: sLoading } = useGetSession();
   const { data: sources, isLoading: srcLoading } = useGetSources(
@@ -23,7 +29,11 @@ export default function Sidebar() {
           <p className="text-gray-400">No sources yet</p>
         )}
         {sources?.map((s) => (
-          <div key={s.id} className="rounded p-2 hover:bg-[#2A2A2A]">
+          <div
+            key={s.id}
+            className="cursor-pointer rounded p-2 hover:bg-[#2A2A2A]"
+            onClick={() => session?.id && onSelectSource(s.id, session.id)}
+          >
             {s.name} <span className="text-xs text-gray-400">({s.type})</span>
           </div>
         ))}
