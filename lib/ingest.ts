@@ -1,27 +1,28 @@
+// lib/ingest.ts
 import { Document } from "langchain/document";
 import { RecursiveCharacterTextSplitter } from "langchain/text_splitter";
 import { CheerioWebBaseLoader } from "@langchain/community/document_loaders/web/cheerio";
 import { PDFLoader } from "@langchain/community/document_loaders/fs/pdf";
 import { TextLoader } from "langchain/document_loaders/fs/text";
 import { CSVLoader } from "@langchain/community/document_loaders/fs/csv";
-import { embeddings } from "./embeddings";
-import { Prisma, prisma } from "./db";
+import { embeddings } from "@/lib/embeddings";
+import { Prisma, prisma } from "@/lib/db";
 import { crawlSite, CrawlOptions } from "@/lib/crawler";
+import { randomUUID } from "crypto";
 
-// Function to split doc into chunks
+/* -------------------- shared utils -------------------- */
+
 const splitter = new RecursiveCharacterTextSplitter({
   chunkSize: 1000,
   chunkOverlap: 200,
 });
 
-// Normalize metadata function
 const normalizeMetadata = (
   base: Record<string, any>,
   extra?: Record<string, any>
-) => {
-  return { ...base, ...(extra || {}) };
-};
+) => ({ ...base, ...(extra || {}) });
 
+// Single, safe insert for pgvector + jsonb
 async function insertChunkRowRaw(params: {
   sourceId: string;
   content: string;
@@ -29,23 +30,33 @@ async function insertChunkRowRaw(params: {
   metadata: any;
 }) {
   const { sourceId, content, vector, metadata } = params;
+  const id = randomUUID();
+
   await prisma.$executeRawUnsafe(
     `
     INSERT INTO "SourceChunk"
-      ("sourceId","content","embedding","metadata","createdAt","updatedAt")
+      ("id","sourceId","content","embedding","metadata","createdAt","updatedAt")
     VALUES
-      ($1, $2, $3::vector, $4::jsonb, now(), now())
+      ($1,  $2,        $3,      $4::vector, $5::jsonb, now(), now())
     `,
-    sourceId,
-    content,
-    `[${vector.join(",")}]`,
-    JSON.stringify(metadata)
+    id, // $1 -> id
+    sourceId, // $2 -> sourceId
+    content, // $3 -> content
+    `[${vector.join(",")}]`, // $4 -> embedding::vector
+    JSON.stringify(metadata) // $5 -> metadata::jsonb
   );
 }
 
+// Optional: tiny yield to avoid long event-loop blocking in large loops
+async function tick() {
+  await new Promise((r) => setImmediate(r));
+}
+
+/* -------------------- deep website ingestion -------------------- */
+
 export type DeepIngestOptions = CrawlOptions & {
-  maxChunksPerBatch?: number;
-  selector?: string;
+  maxChunksPerBatch?: number; // default 200
+  selector?: string; // e.g., "main,article,p,h1,h2,h3"
 };
 
 export const ingestWebsiteDeep = async (
@@ -75,12 +86,10 @@ export const ingestWebsiteDeep = async (
   } = options;
 
   try {
-    // Create Source (one per site)
     const source = await prisma.source.create({
       data: { sessionId, name: baseUrl, type: "url" },
     });
 
-    // Crawl site for URLs
     const urls = await crawlSite(baseUrl, {
       maxDepth,
       maxPages,
@@ -93,34 +102,35 @@ export const ingestWebsiteDeep = async (
     });
 
     let totalChunks = 0;
-    let currentBatchTexts: string[] = [];
-    let currentBatchMeta: any[] = [];
+    let texts: string[] = [];
+    let metas: any[] = [];
 
     const flushBatch = async () => {
-      if (currentBatchTexts.length === 0) return;
-      const vectors = await embeddings.embedDocuments(currentBatchTexts);
-      for (let i = 0; i < currentBatchTexts.length; i++) {
+      if (!texts.length) return;
+      const vectors = await embeddings.embedDocuments(texts);
+      for (let i = 0; i < vectors.length; i++) {
         await insertChunkRowRaw({
           sourceId: source.id,
-          content: currentBatchTexts[i],
+          content: texts[i],
           vector: vectors[i],
-          metadata: currentBatchMeta[i],
+          metadata: metas[i],
         });
+        if ((i + 1) % 200 === 0) await tick();
       }
-      totalChunks += currentBatchTexts.length;
-      currentBatchTexts = [];
-      currentBatchMeta = [];
+      totalChunks += texts.length;
+      texts = [];
+      metas = [];
     };
 
     for (const url of urls) {
       const loader = selector
-        ? //@ts-ignore
+        ? // @ts-ignore - community loader accepts selector
           new CheerioWebBaseLoader(url, { selector })
         : new CheerioWebBaseLoader(url);
+
       const docs = await loader.load();
       if (!docs?.length) continue;
 
-      // Normalize documents + split
       const docsWithMeta = docs.map(
         (d, i) =>
           new Document({
@@ -135,9 +145,9 @@ export const ingestWebsiteDeep = async (
       const chunks = await splitter.splitDocuments(docsWithMeta);
 
       for (const c of chunks) {
-        currentBatchTexts.push(c.pageContent);
-        currentBatchMeta.push(normalizeMetadata({ url }, c.metadata));
-        if (currentBatchTexts.length >= maxChunksPerBatch) {
+        texts.push(c.pageContent);
+        metas.push(normalizeMetadata({ url }, c.metadata));
+        if (texts.length >= maxChunksPerBatch) {
           await flushBatch();
         }
       }
@@ -161,12 +171,12 @@ export const ingestWebsiteDeep = async (
   }
 };
 
-/*----------- Website Loader -----------*/
+/* -------------------- single page website -------------------- */
+
 export async function ingestWebsite(
   sessionId: string,
   url: string
 ): Promise<string> {
-  // ------- validate inputs -------
   if (!sessionId) throw new Error("Session ID is required");
   if (!url || typeof url !== "string") throw new Error("Valid URL is required");
   try {
@@ -176,12 +186,10 @@ export async function ingestWebsite(
   }
 
   try {
-    // Load HTML
     const loader = new CheerioWebBaseLoader(url);
     const docs = await loader.load();
     if (!docs?.length) throw new Error("No content found at the specified URL");
 
-    // Normalize metadata and add source
     const docsWithMetadata = docs.map(
       (doc, i) =>
         new Document({
@@ -193,39 +201,27 @@ export async function ingestWebsite(
         })
     );
 
-    // Split documents into chunks
     const chunks = await splitter.splitDocuments(docsWithMetadata);
     if (!chunks.length)
       throw new Error("No valid content chunks were generated");
 
-    // Upsert Source entry
     const source = await prisma.source.create({
       data: { sessionId, name: url, type: "url" },
     });
 
-    // Embed chunks and create SourceChunk entries
     const texts = chunks.map((c) => c.pageContent);
-    const vectors = await embeddings.embedDocuments(texts); // batch call
+    const vectors = await embeddings.embedDocuments(texts);
 
-    // Use a transaction for bulk inserts
     for (let i = 0; i < vectors.length; i++) {
-      const vec = vectors[i];
-      const content = chunks[i].pageContent;
-      const meta = normalizeMetadata({ url, source: url }, chunks[i].metadata);
-
-      await prisma.$executeRawUnsafe(
-        `
-      INSERT INTO "SourceChunk"
-        ("sourceId","content","embedding","metadata","createdAt","updatedAt")
-      VALUES
-        ($1, $2, $3::vector, $4::jsonb, now(), now())
-      `,
-        source.id,
-        content,
-        `[${vec.join(",")}]`,
-        JSON.stringify(meta)
-      );
+      await insertChunkRowRaw({
+        sourceId: source.id,
+        content: chunks[i].pageContent,
+        vector: vectors[i],
+        metadata: normalizeMetadata({ url, source: url }, chunks[i].metadata),
+      });
+      if ((i + 1) % 200 === 0) await tick();
     }
+
     return source.id;
   } catch (err: any) {
     console.error("[ingestWebsite] Error:", err);
@@ -234,7 +230,8 @@ export async function ingestWebsite(
   }
 }
 
-/*----------- PDF Loader -----------*/
+/* -------------------- PDF -------------------- */
+
 export const ingestPDF = async (
   sessionId: string,
   fileName: string,
@@ -245,18 +242,18 @@ export const ingestPDF = async (
     throw new Error("File name and buffer are required");
 
   try {
-    // Load PDF
     const loader = new PDFLoader(new Blob([new Uint8Array(fileBuffer)]), {
       parsedItemSeparator: "\n\n",
     });
-
     const docs = await loader.load();
     if (!docs?.length) throw new Error("No content found in the PDF");
 
-    // Add metadata and normalize
     const docsWithMetadata = docs.map((doc, i) => {
       const page =
-        doc.metadata?.loc?.pageNumber ?? doc.metadata?.pdf?.pageNumber ?? i + 1;
+        doc.metadata?.loc?.pageNumber ??
+        // @ts-ignore optional in some loaders
+        doc.metadata?.pdf?.pageNumber ??
+        i + 1;
 
       return new Document({
         pageContent: doc.pageContent,
@@ -264,36 +261,27 @@ export const ingestPDF = async (
       });
     });
 
-    // Split documents into chunks
     const chunks = await splitter.splitDocuments(docsWithMetadata);
     if (!chunks.length)
       throw new Error("No valid content chunks were generated from the PDF");
 
-    // Upsert Source entry
     const source = await prisma.source.create({
       data: { sessionId, name: fileName, type: "pdf" },
     });
-    // Embed chunks and create SourceChunk entries
 
     const texts = chunks.map((c) => c.pageContent);
     const vectors = await embeddings.embedDocuments(texts);
 
-    // Insert in a transaction (consider chunking for very large arrays)
     for (let i = 0; i < vectors.length; i++) {
-      const vec = vectors[i];
-      const chunk = chunks[i];
-
-      await prisma.$executeRawUnsafe(
-        `
-        INSERT INTO "SourceChunk" ("id", "sourceId", "content", "embedding", "metadata", "createdAt", "updatedAt")
-        VALUES (gen_random_uuid(), $1, $2, $3::vector, $4::jsonb, now(), now())
-        `,
-        source.id,
-        chunk.pageContent,
-        `[${vec.join(",")}]`, // vector literal
-        JSON.stringify(normalizeMetadata({ source: fileName }, chunk.metadata)) // stringified JSON
-      );
+      await insertChunkRowRaw({
+        sourceId: source.id,
+        content: chunks[i].pageContent,
+        vector: vectors[i],
+        metadata: normalizeMetadata({ source: fileName }, chunks[i].metadata),
+      });
+      if ((i + 1) % 200 === 0) await tick();
     }
+
     return source.id;
   } catch (err: any) {
     console.error("[ingestPDF] Error:", err);
@@ -302,7 +290,8 @@ export const ingestPDF = async (
   }
 };
 
-/* ----------- CSV Loader ----------- */
+/* -------------------- CSV -------------------- */
+
 export const ingestCSV = async (
   sessionId: string,
   fileName: string,
@@ -313,16 +302,13 @@ export const ingestCSV = async (
   if (!buffer?.length) throw new Error("CSV buffer is required");
 
   try {
-    const loader = new CSVLoader(new Blob([new Uint8Array(buffer)]), {
-      // uses first row as header by default
-    });
+    const loader = new CSVLoader(new Blob([new Uint8Array(buffer)]));
     const docs = await loader.load();
     if (!docs?.length) throw new Error("No rows parsed from CSV");
 
-    // Each row becomes a small doc; keep row index for traceability
     const docsWithMeta = docs.map((d, idx) => {
       return new Document({
-        pageContent: d.pageContent, // row as text
+        pageContent: d.pageContent,
         metadata: normalizeMetadata({ row: idx + 1, source: fileName }),
       });
     });
@@ -339,19 +325,13 @@ export const ingestCSV = async (
     const vectors = await embeddings.embedDocuments(texts);
 
     for (let i = 0; i < vectors.length; i++) {
-      const vec = vectors[i];
-      const chunk = chunks[i];
-
-      await prisma.$executeRawUnsafe(
-        `
-        INSERT INTO "SourceChunk" ("id", "sourceId", "content", "embedding", "metadata", "createdAt", "updatedAt")
-        VALUES (gen_random_uuid(), $1, $2, $3::vector, $4::jsonb, now(), now())
-        `,
-        source.id,
-        chunk.pageContent,
-        `[${vec.join(",")}]`, // vector literal
-        JSON.stringify(normalizeMetadata({ source: fileName }, chunk.metadata)) // stringified JSON
-      );
+      await insertChunkRowRaw({
+        sourceId: source.id,
+        content: chunks[i].pageContent,
+        vector: vectors[i],
+        metadata: normalizeMetadata({ source: fileName }, chunks[i].metadata),
+      });
+      if ((i + 1) % 200 === 0) await tick();
     }
 
     return source.id;
@@ -362,7 +342,8 @@ export const ingestCSV = async (
   }
 };
 
-/* -------------------- TXT Loader -------------------- */
+/* -------------------- TXT -------------------- */
+
 export async function ingestTXT(
   sessionId: string,
   fileName: string,
@@ -397,19 +378,13 @@ export async function ingestTXT(
     const vectors = await embeddings.embedDocuments(texts);
 
     for (let i = 0; i < vectors.length; i++) {
-      const vec = vectors[i];
-      const chunk = chunks[i];
-
-      await prisma.$executeRawUnsafe(
-        `
-        INSERT INTO "SourceChunk" ("id", "sourceId", "content", "embedding", "metadata", "createdAt", "updatedAt")
-        VALUES (gen_random_uuid(), $1, $2, $3::vector, $4::jsonb, now(), now())
-        `,
-        source.id,
-        chunk.pageContent,
-        `[${vec.join(",")}]`, // vector literal
-        JSON.stringify(normalizeMetadata({ source: fileName }, chunk.metadata)) // stringified JSON
-      );
+      await insertChunkRowRaw({
+        sourceId: source.id,
+        content: chunks[i].pageContent,
+        vector: vectors[i],
+        metadata: normalizeMetadata({ source: fileName }, chunks[i].metadata),
+      });
+      if ((i + 1) % 200 === 0) await tick();
     }
 
     return source.id;

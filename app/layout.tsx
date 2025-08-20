@@ -6,7 +6,7 @@ const inter = Inter({ subsets: ["latin"] });
 
 export const metadata = {
   title: "NotebookLM",
-  description: "AI-powered notebook with sources and chat",
+  description: "Document chat with RAG",
 };
 
 export default function RootLayout({
@@ -16,7 +16,7 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en" className={inter.className}>
-      <body className="bg-[#2A2A2A] text-white">
+      <body className="bg-gray-100">
         <Providers>{children}</Providers>
       </body>
     </html>

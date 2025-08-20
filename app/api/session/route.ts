@@ -25,11 +25,10 @@ export async function GET() {
 
     return NextResponse.json(session);
   } catch (error) {
-    {
-      error: "Failed to fetch session.";
-    }
-    {
-      status: 500;
-    }
+    console.error("[GET /api/session] error:", error);
+    return NextResponse.json(
+      { error: "Failed to fetch session" },
+      { status: 500 }
+    );
   }
 }

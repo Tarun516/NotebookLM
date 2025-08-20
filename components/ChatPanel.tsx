@@ -1,4 +1,3 @@
-// components/ChatPanel.tsx
 "use client";
 
 import { useState } from "react";
@@ -19,14 +18,16 @@ function CitationLink({
   index: number;
   citation: Citation | null;
 }) {
-  if (!citation) return <span className="ml-1 text-gray-400">[{index}]</span>;
+  if (!citation)
+    return <span className="text-blue-600 text-xs">[{index}]</span>;
+
   if (citation.metadata?.url) {
     return (
       <a
         href={citation.metadata.url}
         target="_blank"
         rel="noopener noreferrer"
-        className="ml-1 text-blue-400 underline"
+        className="text-blue-600 hover:text-blue-800 text-xs underline"
         title={citation.metadata.url}
       >
         [{index}]
@@ -35,19 +36,25 @@ function CitationLink({
   }
   if (citation.metadata?.page) {
     return (
-      <span className="ml-1 text-green-400">
-        [{index} - PDF Page {citation.metadata.page}]
+      <span
+        className="text-blue-600 text-xs"
+        title={`PDF Page ${citation.metadata.page}`}
+      >
+        [{index}]
       </span>
     );
   }
   if (citation.metadata?.row) {
     return (
-      <span className="ml-1 text-yellow-400">
-        [{index} - CSV Row {citation.metadata.row}]
+      <span
+        className="text-blue-600 text-xs"
+        title={`CSV Row ${citation.metadata.row}`}
+      >
+        [{index}]
       </span>
     );
   }
-  return <span className="ml-1 text-gray-400">[{index}]</span>;
+  return <span className="text-blue-600 text-xs">[{index}]</span>;
 }
 
 function AssistantMessage({
@@ -59,7 +66,7 @@ function AssistantMessage({
 }) {
   const parts = message.split(/(\[\d+\])/g);
   return (
-    <span className="inline-block rounded-lg bg-[#3A3A3A] p-2 text-white">
+    <div className="bg-gray-50 border border-gray-200 rounded-lg p-4 max-w-4xl">
       {parts.map((part, i) => {
         const match = part.match(/\[(\d+)\]/);
         if (match) {
@@ -69,18 +76,26 @@ function AssistantMessage({
             <CitationLink key={i} index={index} citation={citation || null} />
           );
         }
-        return <span key={i}>{part}</span>;
+        return (
+          <span key={i} className="text-gray-900">
+            {part}
+          </span>
+        );
       })}
-    </span>
+    </div>
   );
 }
 
 export default function ChatPanel({
   sessionId,
-  selectedSourceId,
+  selectedSources,
+  sources,
+  onSourceSelectionChange,
 }: {
   sessionId: string;
-  selectedSourceId?: string | null;
+  selectedSources: string[];
+  sources: any[];
+  onSourceSelectionChange: (sourceIds: string[]) => void;
 }) {
   const qc = useQueryClient();
   const { data: messages } = useGetChat(sessionId);
@@ -96,7 +111,9 @@ export default function ChatPanel({
     setPending(true);
     try {
       const body: any = { sessionId, query: q };
-      if (selectedSourceId) body.selectedSources = [selectedSourceId];
+      if (selectedSources.length > 0) {
+        body.selectedSources = selectedSources;
+      }
 
       const res = await fetch("/api/query", {
         method: "POST",
@@ -106,7 +123,6 @@ export default function ChatPanel({
       const data = await res.json();
 
       if (res.ok) {
-        // refetch chat history so user + assistant messages show
         await qc.invalidateQueries({ queryKey: ["chats", sessionId] });
         setLastAssistant({
           id: data?.chatMessage?.id,
@@ -132,15 +148,42 @@ export default function ChatPanel({
     await sendQuery(f);
   };
 
+  const getSourceNames = () => {
+    if (selectedSources.length === 0) return "all sources";
+    if (selectedSources.length === 1) {
+      const source = sources.find((s) => s.id === selectedSources[0]);
+      return source?.name || "selected source";
+    }
+    return `${selectedSources.length} sources`;
+  };
+
   return (
-    <div className="w-3/4 flex flex-col bg-[#2A2A2A]">
-      <div className="border-b border-gray-700 p-2 text-xs text-gray-400">
-        {selectedSourceId
-          ? "Chatting with selected source only"
-          : "Chatting with all sources"}
+    <div className="flex-1 flex flex-col bg-white">
+      {/* Chat Header - NotebookLM style */}
+      <div className="border-b border-gray-200 p-4 bg-white">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center space-x-3">
+            <div className="w-8 h-8 bg-gray-100 rounded-full flex items-center justify-center">
+              <span className="text-sm">💬</span>
+            </div>
+            <div>
+              <h2 className="text-sm font-medium text-gray-900">
+                Chat with {getSourceNames()}
+              </h2>
+              <div className="text-xs text-gray-500 mt-0.5">
+                {selectedSources.length === 0
+                  ? "Asking general questions"
+                  : selectedSources.length === sources?.length
+                  ? `Using all ${sources?.length || 0} sources`
+                  : `Limited to ${selectedSources.length} selected sources`}
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto p-4">
+      {/* Messages */}
+      <div className="flex-1 overflow-y-auto p-4 space-y-4">
         {messages?.map((m) => {
           const isAssistant =
             m.role === "assistant" &&
@@ -150,12 +193,12 @@ export default function ChatPanel({
           return (
             <div
               key={m.id}
-              className={`mb-4 ${
-                m.role === "user" ? "text-right" : "text-left"
+              className={`flex ${
+                m.role === "user" ? "justify-end" : "justify-start"
               }`}
             >
               {m.role === "assistant" ? (
-                <>
+                <div className="max-w-4xl w-full">
                   <AssistantMessage
                     message={m.message}
                     citations={
@@ -163,45 +206,74 @@ export default function ChatPanel({
                     }
                   />
                   {isAssistant && lastAssistant?.followups?.length ? (
-                    <div className="mt-2 flex flex-wrap gap-2">
+                    <div className="mt-3 flex flex-wrap gap-2">
                       {lastAssistant.followups.map((f, i) => (
                         <button
                           key={i}
                           onClick={() => onFollowup(f)}
-                          className="rounded bg-[#1E1E1E] px-2 py-1 text-xs text-gray-200 hover:bg-[#333] border border-gray-700"
+                          className="px-3 py-2 text-xs bg-white border border-gray-200 rounded-full hover:bg-gray-50 text-gray-700"
                         >
                           {f}
                         </button>
                       ))}
                     </div>
                   ) : null}
-                </>
+                </div>
               ) : (
-                <span className="inline-block rounded-lg bg-[#4285F4] p-2 text-white">
+                <div className="bg-blue-600 text-white px-4 py-2 rounded-lg max-w-md">
                   {m.message}
-                </span>
+                </div>
               )}
             </div>
           );
         })}
       </div>
 
-      <div className="flex border-t border-gray-700 p-2">
-        <input
-          type="text"
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && onSend()}
-          placeholder="Ask something..."
-          className="flex-1 rounded border border-gray-600 bg-[#1E1E1E] p-2 text-white"
-        />
-        <button
-          onClick={onSend}
-          className="ml-2 rounded bg-[#4285F4] px-4 py-2 text-white disabled:opacity-60"
-          disabled={pending}
-        >
-          {pending ? "Thinking..." : "Send"}
-        </button>
+      {/* Input Area */}
+      <div className="border-t border-gray-200 p-4 bg-white">
+        <div className="flex space-x-2">
+          <input
+            type="text"
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault(); // prevents accidental form submit
+                onSend();
+              }
+            }}
+            placeholder={
+              selectedSources.length === 0
+                ? "Ask me anything..."
+                : `Ask about ${getSourceNames()}...`
+            }
+            className="flex-1 text-black px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
+          />
+
+          <button
+            onClick={onSend}
+            className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+            disabled={pending || !input.trim()}
+          >
+            {pending ? "..." : "Send"}
+          </button>
+        </div>
+
+        {/* Source indicator */}
+        {selectedSources.length > 0 && (
+          <div className="mt-2 flex items-center space-x-2 text-xs text-gray-500">
+            <div className="w-2 h-2 bg-blue-500 rounded-full"></div>
+            <span>
+              Searching in:{" "}
+              {selectedSources
+                .map((id) => {
+                  const source = sources.find((s) => s.id === id);
+                  return source?.name || "Unknown";
+                })
+                .join(", ")}
+            </span>
+          </div>
+        )}
       </div>
     </div>
   );

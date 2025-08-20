@@ -42,94 +42,13 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "query required" }, { status: 400 });
     }
 
-    // 0) Persist the user message so ChatPanel shows it immediately
+    // Persist the user message immediately
     const userMsg = await prisma.chat.create({
       data: { sessionId, role: "user", message: query },
     });
 
-    // 1) Embed query (Gemini embeddings)
-    const qVec = await embeddings.embedQuery(query);
-
-    // 2) Retrieve wider pool with similarity and a score
-    const retrieved = await (async () => {
-      if (selectedSources.length > 0) {
-        return prisma.$queryRawUnsafe<
-          Array<{
-            id: string;
-            content: string;
-            metadata: any;
-            sourceId: string;
-            score: number;
-          }>
-        >(
-          `
-          SELECT id, content, metadata, "sourceId",
-                 (embedding <-> $2::vector) AS score
-          FROM "SourceChunk"
-          WHERE "sourceId" = ANY($1::text[])
-          ORDER BY embedding <-> $2::vector
-          LIMIT $3;
-        `,
-          selectedSources,
-          `[${qVec.join(",")}]`,
-          topN
-        );
-      }
-      return prisma.$queryRawUnsafe<
-        Array<{
-          id: string;
-          content: string;
-          metadata: any;
-          sourceId: string;
-          score: number;
-        }>
-      >(
-        `
-        SELECT id, content, metadata, "sourceId",
-               (embedding <-> $2::vector) AS score
-        FROM "SourceChunk"
-        WHERE "sourceId" IN (
-          SELECT id FROM "Source" WHERE "sessionId" = $1
-        )
-        ORDER BY embedding <-> $2::vector
-        LIMIT $3;
-      `,
-        sessionId,
-        `[${qVec.join(",")}]`,
-        topN
-      );
-    })();
-
-    // 3) Diversity + dedup
-    const deduped: typeof retrieved = [];
-    const seen = new Set<string>();
-    const perSourceCount = new Map<string, number>();
-    const maxPerSourceFirstPass = 2;
-
-    for (const r of retrieved) {
-      const key = hashText(r.content);
-      if (seen.has(key)) continue;
-      const cnt = perSourceCount.get(r.sourceId) || 0;
-      if (cnt < maxPerSourceFirstPass) {
-        deduped.push(r);
-        seen.add(key);
-        perSourceCount.set(r.sourceId, cnt + 1);
-      }
-      if (deduped.length >= topK) break;
-    }
-    if (deduped.length < topK) {
-      for (const r of retrieved) {
-        if (deduped.length >= topK) break;
-        const key = hashText(r.content);
-        if (seen.has(key)) continue;
-        deduped.push(r);
-        seen.add(key);
-      }
-    }
-
-    // Decide if we should fall back to general chat
-    const noContext = deduped.length === 0;
-    const isSmallTalk = SMALL_TALK.test(query);
+    // Determine search scope
+    const searchMode = selectedSources.length === 0 ? "all" : "selected";
 
     let answer = "";
     let followups: string[] = [];
@@ -140,51 +59,149 @@ export async function POST(req: Request) {
       sourceId: string;
     }> = [];
 
-    if (noContext || isSmallTalk) {
-      // General chat (no citations)
+    // Check if we should use general chat (no sources selected + small talk)
+    const useGeneralChat =
+      selectedSources.length === 0 && SMALL_TALK.test(query);
+
+    let deduped: Array<{
+      id: string;
+      content: string;
+      metadata: any;
+      sourceId: string;
+      score: number;
+    }> = [];
+
+    if (useGeneralChat) {
+      // General chat mode
       const resp = await groq.invoke([
         { role: "system", content: SYSTEM_GENERAL },
         { role: "user", content: query },
       ]);
       answer = resp.content.toString().trim();
-      citations = [];
-      followups = [];
     } else {
-      // RAG flow
-      const context = deduped
-        .map((r, i) => `(${i + 1}) ${r.content}`)
-        .join("\n\n");
-      citations = deduped.map((r, i) => ({
-        id: r.id,
-        index: i + 1,
-        metadata: r.metadata || {},
-        sourceId: r.sourceId,
-      }));
+      // RAG mode - embed query
+      const qVec = await embeddings.embedQuery(query);
 
-      const ragResp = await groq.invoke([
-        { role: "system", content: SYSTEM_RAG_QA },
-        { role: "user", content: userRagQA(context, query) },
-      ]);
+      // Retrieve from selected sources or all sources
+      const retrieved = await (async () => {
+        if (selectedSources.length > 0) {
+          // Search only in selected sources
+          return prisma.$queryRawUnsafe<
+            Array<{
+              id: string;
+              content: string;
+              metadata: any;
+              sourceId: string;
+              score: number;
+            }>
+          >(
+            `
+            SELECT id, content, metadata, "sourceId",
+                   (embedding <-> $2::vector) AS score
+            FROM "SourceChunk"
+            WHERE "sourceId" = ANY($1::text[])
+            ORDER BY embedding <-> $2::vector
+            LIMIT $3;
+          `,
+            selectedSources,
+            `[${qVec.join(",")}]`,
+            topN
+          );
+        } else {
+          // Search in all session sources
+          return prisma.$queryRawUnsafe<
+            Array<{
+              id: string;
+              content: string;
+              metadata: any;
+              sourceId: string;
+              score: number;
+            }>
+          >(
+            `
+            SELECT id, content, metadata, "sourceId",
+                   (embedding <-> $2::vector) AS score
+            FROM "SourceChunk"
+            WHERE "sourceId" IN (
+              SELECT id FROM "Source" WHERE "sessionId" = $1
+            )
+            ORDER BY embedding <-> $2::vector
+            LIMIT $3;
+          `,
+            sessionId,
+            `[${qVec.join(",")}]`,
+            topN
+          );
+        }
+      })();
 
-      try {
-        const txt = ragResp.content.toString();
-        const start = txt.indexOf("{");
-        const end = txt.lastIndexOf("}");
-        const json = JSON.parse(txt.slice(start, end + 1));
-        answer = String(json?.answer || "");
-        followups = Array.isArray(json?.followups) ? json.followups : [];
-      } catch {
-        answer =
-          "I could not parse the model output. Please try rephrasing the question.";
-        followups = [];
+      // Apply diversity filtering
+      const deduped: typeof retrieved = [];
+      const seen = new Set<string>();
+      const perSourceCount = new Map<string, number>();
+      const maxPerSourceFirstPass = 2;
+
+      for (const r of retrieved) {
+        const key = hashText(r.content);
+        if (seen.has(key)) continue;
+        const cnt = perSourceCount.get(r.sourceId) || 0;
+        if (cnt < maxPerSourceFirstPass) {
+          deduped.push(r);
+          seen.add(key);
+          perSourceCount.set(r.sourceId, cnt + 1);
+        }
+        if (deduped.length >= topK) break;
       }
-      if (!answer) {
-        answer = "I could not find relevant information in the sources.";
-        followups = [];
+
+      // Fill remaining slots if needed
+      if (deduped.length < topK) {
+        for (const r of retrieved) {
+          if (deduped.length >= topK) break;
+          const key = hashText(r.content);
+          if (seen.has(key)) continue;
+          deduped.push(r);
+          seen.add(key);
+        }
+      }
+
+      if (deduped.length === 0) {
+        answer =
+          selectedSources.length > 0
+            ? "I couldn't find relevant information in the selected sources."
+            : "I couldn't find relevant information in your sources.";
+      } else {
+        // Build context and get AI response
+        const context = deduped
+          .map((r, i) => `(${i + 1}) ${r.content}`)
+          .join("\n\n");
+
+        citations = deduped.map((r, i) => ({
+          id: r.id,
+          index: i + 1,
+          metadata: r.metadata || {},
+          sourceId: r.sourceId,
+        }));
+
+        const ragResp = await groq.invoke([
+          { role: "system", content: SYSTEM_RAG_QA },
+          { role: "user", content: userRagQA(context, query) },
+        ]);
+
+        try {
+          const txt = ragResp.content.toString();
+          const start = txt.indexOf("{");
+          const end = txt.lastIndexOf("}");
+          const json = JSON.parse(txt.slice(start, end + 1));
+          answer = String(json?.answer || "");
+          followups = Array.isArray(json?.followups) ? json.followups : [];
+        } catch {
+          answer = "I had trouble processing the response. Please try again.";
+          followups = [];
+        }
       }
     }
 
-    // 4) Store assistant message
+    // Store assistant response
     const assistant = await prisma.chat.create({
       data: { sessionId, role: "assistant", message: answer },
     });
@@ -193,9 +210,11 @@ export async function POST(req: Request) {
       userMessage: userMsg,
       answer,
       citations,
-      retrievedChunks: deduped,
+      retrievedChunks: useGeneralChat ? [] : deduped,
       chatMessage: assistant,
       followups,
+      searchMode,
+      sourcesUsed: selectedSources.length,
     });
   } catch (err) {
     console.error("[POST /api/query] error:", err);
