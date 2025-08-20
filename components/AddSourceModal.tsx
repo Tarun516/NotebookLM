@@ -67,7 +67,17 @@ export default function AddSourceModal({ sessionId, open, onClose }: Props) {
 
   return (
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
-      <div className="bg-white rounded-lg w-full max-w-md">
+      <div className="bg-white rounded-lg w-full max-w-md relative">
+        {/* Loader Overlay */}
+        {addSource.isPending && (
+          <div className="absolute inset-0 bg-white/80 flex flex-col items-center justify-center z-50 rounded-lg">
+            <div className="w-10 h-10 border-4 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
+            <p className="mt-4 text-sm text-gray-700 font-medium">
+              Uploading & indexing your source...
+            </p>
+          </div>
+        )}
+
         {/* Header */}
         <div className="p-6 border-b border-gray-200">
           <h2 className="text-lg font-medium text-gray-900">Add source</h2>
@@ -85,6 +95,7 @@ export default function AddSourceModal({ sessionId, open, onClose }: Props) {
                 : "border-transparent text-gray-500 hover:text-gray-700"
             }`}
             onClick={() => setActiveTab("upload")}
+            disabled={addSource.isPending}
           >
             Upload files
           </button>
@@ -95,6 +106,7 @@ export default function AddSourceModal({ sessionId, open, onClose }: Props) {
                 : "border-transparent text-gray-500 hover:text-gray-700"
             }`}
             onClick={() => setActiveTab("url")}
+            disabled={addSource.isPending}
           >
             Add website
           </button>
@@ -123,6 +135,7 @@ export default function AddSourceModal({ sessionId, open, onClose }: Props) {
                   onChange={(e) => setFile(e.target.files?.[0] || null)}
                   className="hidden"
                   id="file-upload"
+                  disabled={addSource.isPending}
                 />
                 <label htmlFor="file-upload" className="cursor-pointer">
                   <div className="space-y-2">
@@ -149,6 +162,7 @@ export default function AddSourceModal({ sessionId, open, onClose }: Props) {
                   onChange={(e) => setUrl(e.target.value)}
                   placeholder="https://example.com/article"
                   className="w-full text-black px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
+                  disabled={addSource.isPending}
                 />
               </div>
               <div className="text-xs text-gray-500">

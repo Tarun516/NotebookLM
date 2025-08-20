@@ -39,6 +39,7 @@ CREATE TABLE "public"."Chat" (
     "sessionId" TEXT NOT NULL,
     "role" TEXT NOT NULL,
     "message" TEXT NOT NULL,
+    "citations" JSONB,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
 
