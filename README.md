@@ -96,4 +96,4 @@ npx prisma migrate dev --name init
 npm run dev
 ```
 
-App will be live at **[http://localhost:3000](http://localhost:3000)**.
+App will be live at **[https://notebook-lm-r86c.vercel.app/](https://notebook-lm-r86c.vercel.app/)**.
