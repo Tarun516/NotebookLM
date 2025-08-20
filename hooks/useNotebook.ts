@@ -6,8 +6,18 @@ import {
   addSource,
   fetchChat,
   sendMessage,
+  streamQuery,
 } from "@/services/notebookService";
-import { Session, Source, Chat } from "@/types";
+import {
+  Session,
+  Source,
+  Chat,
+  Citation,
+  QueryRequest,
+  StreamEvent,
+  StreamingMessage,
+} from "@/types";
+import { useState, useCallback } from "react";
 
 /* -------------------- SESSION HOOKS -------------------- */
 export const useGetSession = () => {
@@ -54,4 +64,116 @@ export const useSendMessage = (sessionId: string) => {
       queryClient.invalidateQueries({ queryKey: ["chats", sessionId] });
     },
   });
+};
+
+export const useStreamingQuery = (sessionId: string) => {
+  const qc = useQueryClient();
+  const [optimisticMessage, setOptimisticMessage] = useState<string | null>(
+    null
+  );
+  const [streamingMessage, setStreamingMessage] =
+    useState<StreamingMessage | null>(null);
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [lastFollowups, setLastFollowups] = useState<string[]>([]);
+
+  const sendQuery = useCallback(
+    async (query: string, selectedSources: string[] = []) => {
+      if (!query.trim() || isProcessing) return;
+
+      setOptimisticMessage(query);
+      setIsProcessing(true);
+      setLastFollowups([]);
+      setStreamingMessage(null);
+
+      try {
+        const request: QueryRequest = {
+          sessionId,
+          query: query.trim(),
+          selectedSources: selectedSources.length ? selectedSources : undefined,
+        };
+
+        await streamQuery(request, async (event: any) => {
+          switch (event.type) {
+            case "searching":
+              setStreamingMessage({
+                id: "temp",
+                content: "Searching through your sources...",
+                isComplete: false,
+                citations: [],
+                followups: [],
+              });
+              break;
+            case "thinking":
+              setStreamingMessage({
+                id: "temp",
+                content: "Let me think about this...",
+                isComplete: false,
+                citations: [],
+                followups: [],
+              });
+              break;
+            case "generating":
+              setStreamingMessage({
+                id: "temp",
+                content: "",
+                isComplete: false,
+                citations: event.citations || [],
+                followups: [],
+              });
+              break;
+            case "token":
+              if (event.content) {
+                setStreamingMessage((prev) =>
+                  prev
+                    ? { ...prev, content: prev.content + event.content }
+                    : {
+                        id: "temp",
+                        content: event.content,
+                        isComplete: false,
+                        citations: [],
+                        followups: [],
+                      }
+                );
+              }
+              break;
+            case "complete":
+              setLastFollowups(event.followups || []);
+              await qc.invalidateQueries({ queryKey: ["chats", sessionId] });
+              setStreamingMessage(null);
+              break;
+            case "error":
+              setStreamingMessage({
+                id: "error",
+                content: event.error || "Sorry, something went wrong.",
+                isComplete: true,
+                citations: [],
+                followups: [],
+              });
+              break;
+          }
+        });
+      } catch (err) {
+        console.error("Query error:", err);
+        setStreamingMessage({
+          id: "error",
+          content: "Sorry, something went wrong.",
+          isComplete: true,
+          citations: [],
+          followups: [],
+        });
+      } finally {
+        setOptimisticMessage(null);
+        setIsProcessing(false);
+      }
+    },
+    [sessionId, isProcessing, qc]
+  );
+
+  return {
+    optimisticMessage,
+    streamingMessage,
+    isProcessing,
+    lastFollowups,
+    sendQuery,
+  };
 };

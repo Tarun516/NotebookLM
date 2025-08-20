@@ -1,16 +1,21 @@
 "use client";
 
-import { useState } from "react";
-import { useGetChat } from "@/hooks/useNotebook";
-import { useQueryClient } from "@tanstack/react-query";
+import { useState, useRef, useEffect } from "react";
+import { useGetChat, useStreamingQuery } from "@/hooks/useNotebook";
+import { Citation } from "@/types";
 
-type Citation = {
-  id: string;
-  index: number;
-  metadata: any;
-  sourceId: string;
-};
 
+function TypingLoader() {
+  return (
+    <div className="flex items-center space-x-1 py-2">
+      <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce [animation-delay:-0.3s]"></div>
+      <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce [animation-delay:-0.15s]"></div>
+      <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce"></div>
+    </div>
+  );
+}
+
+// Component to handle citation links
 function CitationLink({
   index,
   citation,
@@ -18,70 +23,164 @@ function CitationLink({
   index: number;
   citation: Citation | null;
 }) {
-  if (!citation)
-    return <span className="text-blue-600 text-xs">[{index}]</span>;
+  const [open, setOpen] = useState(false);
 
-  if (citation.metadata?.url) {
-    return (
-      <a
-        href={citation.metadata.url}
-        target="_blank"
-        rel="noopener noreferrer"
+  if (!citation) return <span>[{index}]</span>;
+
+  return (
+    <>
+      <button
+        onClick={() => setOpen(true)}
         className="text-blue-600 hover:text-blue-800 text-xs underline"
-        title={citation.metadata.url}
       >
         [{index}]
-      </a>
-    );
-  }
-  if (citation.metadata?.page) {
-    return (
-      <span
-        className="text-blue-600 text-xs"
-        title={`PDF Page ${citation.metadata.page}`}
-      >
-        [{index}]
-      </span>
-    );
-  }
-  if (citation.metadata?.row) {
-    return (
-      <span
-        className="text-blue-600 text-xs"
-        title={`CSV Row ${citation.metadata.row}`}
-      >
-        [{index}]
-      </span>
-    );
-  }
-  return <span className="text-blue-600 text-xs">[{index}]</span>;
+      </button>
+
+      {open && (
+        <div className="fixed inset-0 bg-black bg-opacity-40 flex items-center justify-center z-50">
+          <div className="bg-white p-6 rounded-lg shadow-lg max-w-md">
+            <h3 className="text-lg font-semibold mb-2">Source Reference</h3>
+            {citation.metadata?.url && (
+              <a
+                href={citation.metadata.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-blue-600 underline"
+              >
+                Open Source
+              </a>
+            )}
+            {citation.metadata?.page && (
+              <p>📄 PDF Page: {citation.metadata.page}</p>
+            )}
+            {citation.metadata?.row && (
+              <p>📊 CSV Row: {citation.metadata.row}</p>
+            )}
+            <button
+              onClick={() => setOpen(false)}
+              className="mt-4 px-4 py-2 bg-blue-600 text-white rounded"
+            >
+              Close
+            </button>
+          </div>
+        </div>
+      )}
+    </>
+  );
 }
 
+// Helper function to parse potential JSON content
+function parseMessageContent(message: string): {
+  content: string;
+  isJson: boolean;
+} {
+  // Check if message looks like JSON
+  const trimmed = message.trim();
+  if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (parsed.answer !== undefined) {
+        return { content: parsed.answer, isJson: true };
+      }
+    } catch (e) {
+      // If JSON parsing fails, return original message
+    }
+  }
+  return { content: message, isJson: false };
+}
+
+// Component to display assistant messages with citations
 function AssistantMessage({
   message,
   citations,
+  isStreaming = false,
 }: {
   message: string;
   citations: Citation[];
+  isStreaming?: boolean;
 }) {
-  const parts = message.split(/(\[\d+\])/g);
+  const { content } = parseMessageContent(message);
+
+  // Split into paragraphs and format
+  const paragraphs = content.split("\n\n").filter((p) => p.trim());
+
   return (
-    <div className="bg-gray-50 border border-gray-200 rounded-lg p-4 max-w-4xl">
-      {parts.map((part, i) => {
-        const match = part.match(/\[(\d+)\]/);
-        if (match) {
-          const index = parseInt(match[1], 10);
-          const citation = citations.find((c) => c.index === index);
-          return (
-            <CitationLink key={i} index={index} citation={citation || null} />
-          );
-        }
-        return (
-          <span key={i} className="text-gray-900">
-            {part}
-          </span>
-        );
-      })}
+    <div className="group relative">
+      <div
+        className="bg-gradient-to-br from-gray-50 to-gray-100 
+                      border border-gray-200 rounded-2xl p-4 max-w-4xl
+                      shadow-sm hover:shadow-md transition-all duration-300"
+      >
+        <div className="prose prose-sm max-w-none">
+          {paragraphs.map((paragraph, pIndex) => {
+            const parts = paragraph.split(/(\[\d+\])/g);
+
+            return (
+              <div key={pIndex} className={pIndex > 0 ? "mt-3" : ""}>
+                {parts.map((part, i) => {
+                  const match = part.match(/\[(\d+)\]/);
+                  if (match) {
+                    const index = parseInt(match[1], 10);
+                    const citation = citations.find((c) => c.index === index);
+                    return (
+                      <CitationLink
+                        key={i}
+                        index={index}
+                        citation={citation || null}
+                      />
+                    );
+                  }
+
+                  // Format lists and structure
+                  if (part.includes("•") || part.match(/^\d+\./m)) {
+                    return (
+                      <div key={i} className="my-2">
+                        {part.split("\n").map((line, lineIndex) => (
+                          <div
+                            key={lineIndex}
+                            className={
+                              line.trim().startsWith("•") ||
+                              line.match(/^\d+\./)
+                                ? "ml-4 my-1"
+                                : ""
+                            }
+                          >
+                            {line.trim()}
+                          </div>
+                        ))}
+                      </div>
+                    );
+                  }
+
+                  return (
+                    <span key={i} className="text-gray-900 leading-relaxed">
+                      {part}
+                    </span>
+                  );
+                })}
+              </div>
+            );
+          })}
+
+          {isStreaming && (
+            <span className="inline-block w-2 h-5 bg-blue-500 animate-pulse ml-1" />
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function OptimisticMessage({ message }: { message: string }) {
+  return (
+    <div className="flex justify-end">
+      <div
+        className="bg-gradient-to-r from-blue-600 to-blue-700 text-white 
+                      px-4 py-3 rounded-2xl max-w-md shadow-lg
+                      animate-in slide-in-from-right-2 duration-300"
+      >
+        <p className="text-sm leading-relaxed">{message}</p>
+      </div>
     </div>
   );
 }
@@ -97,57 +196,31 @@ export default function ChatPanel({
   sources: any[];
   onSourceSelectionChange: (sourceIds: string[]) => void;
 }) {
-  const qc = useQueryClient();
   const { data: messages } = useGetChat(sessionId);
+  const {
+    optimisticMessage,
+    streamingMessage,
+    isProcessing,
+    lastFollowups,
+    sendQuery,
+  } = useStreamingQuery(sessionId);
   const [input, setInput] = useState("");
-  const [pending, setPending] = useState(false);
-  const [lastAssistant, setLastAssistant] = useState<{
-    id: string;
-    citations: Citation[];
-    followups: string[];
-  } | null>(null);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  const sendQuery = async (q: string) => {
-    setPending(true);
-    try {
-      const body: any = { sessionId, query: q };
-      if (selectedSources.length > 0) {
-        body.selectedSources = selectedSources;
-      }
-
-      const res = await fetch("/api/query", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      const data = await res.json();
-
-      if (res.ok) {
-        await qc.invalidateQueries({ queryKey: ["chats", sessionId] });
-        setLastAssistant({
-          id: data?.chatMessage?.id,
-          citations: data?.citations || [],
-          followups: data?.followups || [],
-        });
-      } else {
-        console.error("Query error:", data?.error);
-      }
-    } finally {
-      setPending(false);
-    }
-  };
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages, optimisticMessage, streamingMessage]);
 
   const onSend = async () => {
-    if (!input.trim()) return;
-    const q = input.trim();
+    if (!input.trim() || isProcessing) return;
+    await sendQuery(input.trim(), selectedSources);
     setInput("");
-    await sendQuery(q);
   };
 
-  const onFollowup = async (f: string) => {
-    await sendQuery(f);
+  const onFollowup = async (followup: string) => {
+    if (isProcessing) return;
+    await sendQuery(followup, selectedSources);
   };
-
   const getSourceNames = () => {
     if (selectedSources.length === 0) return "all sources";
     if (selectedSources.length === 1) {
@@ -157,22 +230,24 @@ export default function ChatPanel({
     return `${selectedSources.length} sources`;
   };
 
+  // Filter out the streaming message from DB messages if it exists
+  const filteredMessages = messages || [];
   return (
-    <div className="flex-1 flex flex-col bg-white">
-      {/* Chat Header - NotebookLM style */}
-      <div className="border-b border-gray-200 p-4 bg-white">
+    <div className="flex-1 flex flex-col bg-white relative">
+      {/* Header with gradient */}
+      <div className="bg-gradient-to-r from-gray-50 to-gray-100 border-b border-gray-200 p-4">
         <div className="flex items-center justify-between">
           <div className="flex items-center space-x-3">
-            <div className="w-8 h-8 bg-gray-100 rounded-full flex items-center justify-center">
-              <span className="text-sm">💬</span>
+            <div className="w-10 h-10 bg-gradient-to-br from-blue-500 to-purple-600 rounded-full flex items-center justify-center shadow-lg transform hover:scale-105 transition-transform duration-200">
+              <span className="text-white text-lg font-semibold">💬</span>
             </div>
             <div>
-              <h2 className="text-sm font-medium text-gray-900">
+              <h2 className="text-lg font-semibold text-gray-900">
                 Chat with {getSourceNames()}
               </h2>
-              <div className="text-xs text-gray-500 mt-0.5">
+              <div className="text-sm text-gray-600 mt-1">
                 {selectedSources.length === 0
-                  ? "Asking general questions"
+                  ? "General conversation mode"
                   : selectedSources.length === sources?.length
                   ? `Using all ${sources?.length || 0} sources`
                   : `Limited to ${selectedSources.length} selected sources`}
@@ -183,94 +258,168 @@ export default function ChatPanel({
       </div>
 
       {/* Messages */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-4">
-        {messages?.map((m) => {
-          const isAssistant =
-            m.role === "assistant" &&
-            lastAssistant?.id &&
-            lastAssistant.id === m.id;
+      <div className="flex-1 overflow-y-auto p-6 space-y-6 bg-gradient-to-b from-gray-50/30 to-white">
+        {filteredMessages.map((m, index) => {
+          const isLastAssistant =
+            m.role === "assistant" && index === filteredMessages.length - 1;
+
+          // Use citations from the database for ALL messages
+          const citationsToUse = (m.citations as Citation[]) || [];
+
+          // Only show followups for the last assistant message
+          const followupsToUse =
+            isLastAssistant && !streamingMessage ? lastFollowups : [];
 
           return (
             <div
               key={m.id}
               className={`flex ${
                 m.role === "user" ? "justify-end" : "justify-start"
-              }`}
+              } animate-in slide-in-from-bottom-2 duration-300`}
             >
               {m.role === "assistant" ? (
                 <div className="max-w-4xl w-full">
                   <AssistantMessage
                     message={m.message}
-                    citations={
-                      isAssistant ? lastAssistant?.citations || [] : []
-                    }
+                    citations={citationsToUse} // Now citations persist for all messages!
                   />
-                  {isAssistant && lastAssistant?.followups?.length ? (
-                    <div className="mt-3 flex flex-wrap gap-2">
-                      {lastAssistant.followups.map((f, i) => (
+                  {isLastAssistant && followupsToUse.length > 0 && (
+                    <div className="mt-4 flex flex-wrap gap-2 animate-in slide-in-from-bottom-1 duration-500">
+                      {followupsToUse.map((f, i) => (
                         <button
                           key={i}
                           onClick={() => onFollowup(f)}
-                          className="px-3 py-2 text-xs bg-white border border-gray-200 rounded-full hover:bg-gray-50 text-gray-700"
+                          disabled={isProcessing}
+                          className="px-4 py-2 text-sm bg-white border border-gray-200 
+                                   rounded-full hover:bg-gray-50 text-gray-700
+                                   transition-all duration-200 hover:shadow-md
+                                   disabled:opacity-50 disabled:cursor-not-allowed
+                                   hover:border-blue-300 hover:text-blue-700"
                         >
                           {f}
                         </button>
                       ))}
                     </div>
-                  ) : null}
+                  )}
                 </div>
               ) : (
-                <div className="bg-blue-600 text-white px-4 py-2 rounded-lg max-w-md">
-                  {m.message}
+                <div className="bg-gradient-to-r from-blue-600 to-blue-700 text-white px-4 py-3 rounded-2xl max-w-md shadow-lg">
+                  <p className="text-sm leading-relaxed">{m.message}</p>
                 </div>
               )}
             </div>
           );
         })}
+
+        {/* Optimistic message */}
+        {optimisticMessage && <OptimisticMessage message={optimisticMessage} />}
+
+        {/* Streaming response */}
+        {streamingMessage && !streamingMessage.isComplete && (
+          <div className="flex justify-start animate-in slide-in-from-left-2 duration-300">
+            <div className="max-w-4xl w-full">
+              {streamingMessage.content ? (
+                <AssistantMessage
+                  message={streamingMessage.content}
+                  citations={streamingMessage.citations}
+                  isStreaming={true}
+                />
+              ) : (
+                <div className="bg-gradient-to-br from-gray-50 to-gray-100 border border-gray-200 rounded-2xl p-4 max-w-4xl shadow-sm">
+                  <TypingLoader />
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Show streaming message followups only when complete and not yet in DB */}
+        {streamingMessage?.isComplete &&
+          streamingMessage.followups?.length > 0 && (
+            <div className="flex justify-start">
+              <div className="max-w-4xl w-full">
+                <div className="mt-4 flex flex-wrap gap-2 animate-in slide-in-from-bottom-1 duration-500">
+                  {streamingMessage.followups.map((f, i) => (
+                    <button
+                      key={i}
+                      onClick={() => onFollowup(f)}
+                      disabled={isProcessing}
+                      className="px-4 py-2 text-sm bg-white border border-gray-200 
+                             rounded-full hover:bg-gray-50 text-gray-700
+                             transition-all duration-200 hover:shadow-md
+                             disabled:opacity-50 disabled:cursor-not-allowed
+                             hover:border-blue-300 hover:text-blue-700"
+                    >
+                      {f}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+
+        <div ref={messagesEndRef} />
       </div>
 
-      {/* Input Area */}
+      {/* Input Area - Keep the same */}
       <div className="border-t border-gray-200 p-4 bg-white">
-        <div className="flex space-x-2">
-          <input
-            type="text"
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") {
-                e.preventDefault(); // prevents accidental form submit
-                onSend();
+        <div className="flex space-x-3">
+          <div className="flex-1 relative">
+            <input
+              type="text"
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  onSend();
+                }
+              }}
+              placeholder={
+                selectedSources.length === 0
+                  ? "Ask me anything..."
+                  : `Ask about ${getSourceNames()}...`
               }
-            }}
-            placeholder={
-              selectedSources.length === 0
-                ? "Ask me anything..."
-                : `Ask about ${getSourceNames()}...`
-            }
-            className="flex-1 text-black px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
-          />
+              className="w-full text-gray-900 px-4 py-3 border border-gray-300 
+                       rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 
+                       focus:border-blue-500 transition-all duration-200
+                       placeholder-gray-500 bg-gray-50 hover:bg-white"
+              disabled={isProcessing}
+            />
+          </div>
 
           <button
             onClick={onSend}
-            className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
-            disabled={pending || !input.trim()}
+            className="px-6 py-3 bg-gradient-to-r from-blue-600 to-blue-700 
+                     text-white rounded-xl hover:from-blue-700 hover:to-blue-800 
+                     disabled:opacity-50 disabled:cursor-not-allowed
+                     transition-all duration-200 shadow-lg hover:shadow-xl
+                     transform hover:scale-105 active:scale-95
+                     font-medium"
+            disabled={isProcessing || !input.trim()}
           >
-            {pending ? "..." : "Send"}
+            {isProcessing ? (
+              <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+            ) : (
+              "Send"
+            )}
           </button>
         </div>
 
         {/* Source indicator */}
         {selectedSources.length > 0 && (
-          <div className="mt-2 flex items-center space-x-2 text-xs text-gray-500">
-            <div className="w-2 h-2 bg-blue-500 rounded-full"></div>
+          <div className="mt-3 flex items-center space-x-2 text-sm text-gray-600 animate-in slide-in-from-bottom-1 duration-300">
+            <div className="w-2 h-2 bg-gradient-to-r from-blue-500 to-purple-500 rounded-full animate-pulse" />
             <span>
               Searching in:{" "}
-              {selectedSources
-                .map((id) => {
-                  const source = sources.find((s) => s.id === id);
-                  return source?.name || "Unknown";
-                })
-                .join(", ")}
+              <span className="font-medium">
+                {selectedSources
+                  .map((id) => {
+                    const source = sources.find((s) => s.id === id);
+                    return source?.name || "Unknown";
+                  })
+                  .join(", ")}
+              </span>
             </span>
           </div>
         )}
