@@ -72,7 +72,7 @@ async function fetchHtml(
 export async function crawlSite(
   startUrl: string,
   opts: CrawlOptions = {}
-): Promise<string[]> {
+): Promise<{ url: string; content: string }[]> {
   const {
     maxDepth = 2,
     maxPages = 200,
@@ -86,6 +86,7 @@ export async function crawlSite(
 
   const base = new URL(startUrl);
   const visited = new Set<string>();
+  const results: { url: string; content: string }[] = [];
   const queue: QueueItem[] = [{ url: startUrl, depth: 0 }];
 
   const takeBatch = () => {
@@ -108,6 +109,14 @@ export async function crawlSite(
         if (!html || depth >= maxDepth || visited.size >= maxPages) return;
 
         const $ = cheerio.load(html);
+
+        // ✅ Extract visible text content
+        const content = $("body").text().replace(/\s+/g, " ").trim();
+        if (content.length > 50) {
+          results.push({ url, content });
+        }
+
+        // Extract links
         const links = $("a[href]")
           .map((_, a) => $(a).attr("href") || "")
           .get();
@@ -131,5 +140,5 @@ export async function crawlSite(
     );
   }
 
-  return Array.from(visited);
+  return results;
 }

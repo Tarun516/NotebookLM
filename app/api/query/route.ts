@@ -401,11 +401,17 @@ async function processStreamingQuery({
         const end = fullResponse.lastIndexOf("}");
         if (start !== -1 && end !== -1) {
           const json = JSON.parse(fullResponse.slice(start, end + 1));
-          const enhancedAnswer = enhanceResponse(String(json?.answer || ""));
+
+          // Apply both format + enhance
+          const rawAnswer = String(json?.answer || "");
+          const formatted = formatResponse(rawAnswer);
+          const enhancedAnswer = enhanceResponse(formatted);
+
+          //Use contextual followups
           const finalFollowups =
             Array.isArray(json?.followups) && json.followups.length > 0
               ? json.followups.slice(0, 3)
-              : generateStrategicFollowups(query, context).slice(0, 3);
+              : generateContextualFollowups(query, context).slice(0, 3);
 
           const assistantMsg = await prisma.chat.create({
             data: {
@@ -426,8 +432,6 @@ async function processStreamingQuery({
               })}\n\n`
             )
           );
-        } else {
-          throw new Error("No valid JSON found in response");
         }
       } catch (err) {
         console.error("RAG JSON parsing failed:", err);

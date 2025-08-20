@@ -28,7 +28,6 @@ export function formatResponse(rawAnswer: string): string {
 
 export function generateContextualFollowups(
   query: string,
-  sources: string[],
   context: string
 ): string[] {
   // Generate more specific followups based on query type

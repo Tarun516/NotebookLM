@@ -112,21 +112,17 @@ export async function ingestWebsite(
 
   try {
     // Step 1: Load and process documents (outside transaction)
-    const loader = new CheerioWebBaseLoader(url);
-    const docs = await loader.load();
+    const crawledPages = await crawlSite(url, { maxDepth: 2, maxPages: 20 });
 
-    if (!docs?.length) {
+    if (!crawledPages.length) {
       throw new Error("No content found at the specified URL");
     }
 
-    const docsWithMetadata = docs.map(
-      (doc, i) =>
+    const docsWithMetadata = crawledPages.map(
+      (page, i) =>
         new Document({
-          pageContent: doc.pageContent,
-          metadata: normalizeMetadata(
-            { url, source: doc?.metadata?.source ?? url },
-            { paragraphIndex: i }
-          ),
+          pageContent: page.content,
+          metadata: normalizeMetadata({ url: page.url }, { pageIndex: i }),
         })
     );
 
