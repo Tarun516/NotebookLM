@@ -18,6 +18,8 @@
     "@tanstack/react-query": "^5.85.4",
     "axios": "^1.11.0",
     "cheerio": "^1.1.2",
+    "csv-parse": "^6.1.0",
+    "d3-dsv": "^2.0.0",
     "langchain": "^0.3.31",
     "next": "15.4.7",
     "papaparse": "^5.5.3",
@@ -28,6 +30,7 @@
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
+    "@types/csv-parse": "^1.1.12",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",

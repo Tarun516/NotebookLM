@@ -1,10 +1,9 @@
-// lib/ingest.ts - Optimized with batch operations and proper transaction management
+import { parse } from "csv-parse/sync";
 import { Document } from "langchain/document";
 import { RecursiveCharacterTextSplitter } from "langchain/text_splitter";
 import { CheerioWebBaseLoader } from "@langchain/community/document_loaders/web/cheerio";
 import { PDFLoader } from "@langchain/community/document_loaders/fs/pdf";
 import { TextLoader } from "langchain/document_loaders/fs/text";
-import { CSVLoader } from "@langchain/community/document_loaders/fs/csv";
 import { embeddings } from "@/lib/embeddings";
 import { Prisma, prisma } from "@/lib/db";
 import { crawlSite, CrawlOptions } from "@/lib/crawler";
@@ -267,17 +266,15 @@ export const ingestCSV = async (
 
   try {
     // Step 1: Load and process CSV (outside transaction)
-    const loader = new CSVLoader(new Blob([new Uint8Array(buffer)]));
-    const docs = await loader.load();
+    const records = parse(buffer.toString("utf-8"), {
+      columns: true,
+      skip_empty_lines: true,
+    });
 
-    if (!docs?.length) {
-      throw new Error("No rows parsed from CSV");
-    }
-
-    const docsWithMeta = docs.map((d, idx) => {
+    const docsWithMeta = records.map((row, idx) => {
       return new Document({
-        pageContent: d.pageContent,
-        metadata: normalizeMetadata({ row: idx + 1, source: fileName }),
+        pageContent: JSON.stringify(row),
+        metadata: { row: idx + 1, source: fileName },
       });
     });
 
