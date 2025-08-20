@@ -212,19 +212,11 @@ async function processStreamingQuery({
   encoder: TextEncoder;
 }) {
   try {
-    // Determine if we should use general chat mode
+    // Small talk check
     const useGeneralChat =
       selectedSources.length === 0 && SMALL_TALK.test(query);
 
-    let citations: Array<{
-      id: string;
-      index: number;
-      metadata: any;
-      sourceId: string;
-    }> = [];
-
     if (useGeneralChat) {
-      // ============ GENERAL CHAT MODE ============
       await writer.write(
         encoder.encode(`data: ${JSON.stringify({ type: "thinking" })}\n\n`)
       );
@@ -236,14 +228,13 @@ async function processStreamingQuery({
 
       let fullResponse = "";
       for await (const chunk of stream) {
-        const content = chunk.content;
-        if (content) {
-          fullResponse += content;
+        if (chunk.content) {
+          fullResponse += chunk.content;
           await writer.write(
             encoder.encode(
               `data: ${JSON.stringify({
                 type: "token",
-                content,
+                content: chunk.content,
                 userMessageId: userMsg.id,
               })}\n\n`
             )
@@ -251,9 +242,7 @@ async function processStreamingQuery({
         }
       }
 
-      // Enhance the general response
       const enhancedResponse = enhanceResponse(fullResponse.trim());
-
       const assistantMsg = await prisma.chat.create({
         data: {
           sessionId,
@@ -263,279 +252,268 @@ async function processStreamingQuery({
         },
       });
 
-      // Generate contextual follow-ups for general chat
-      const generalFollowups = [
-        "What would you like to know more about?",
-        "How can I help you with your documents?",
-        "Do you have any specific questions about your sources?",
-      ];
-
       await writer.write(
         encoder.encode(
           `data: ${JSON.stringify({
             type: "complete",
             chatMessage: assistantMsg,
             citations: [],
-            followups: generalFollowups,
+            followups: [
+              "What would you like to know more about?",
+              "How can I help you with your documents?",
+              "Do you have any specific questions about your sources?",
+            ],
           })}\n\n`
         )
       );
-    } else {
-      // ============ RAG MODE ============
+      return;
+    }
 
-      // Step 1: Indicate we're searching
-      await writer.write(
-        encoder.encode(`data: ${JSON.stringify({ type: "searching" })}\n\n`)
-      );
+    // RAG mode
+    await writer.write(
+      encoder.encode(`data: ${JSON.stringify({ type: "searching" })}\n\n`)
+    );
 
-      // Step 2: Generate embeddings and search
-      const qVec = await embeddings.embedQuery(query);
+    const qVec = await embeddings.embedQuery(query);
 
-      // Get all sources for context and naming
-      const allSources = await prisma.source.findMany({
-        where: { sessionId },
-        select: { id: true, name: true, type: true },
-      });
+    const allSources = await prisma.source.findMany({
+      where: { sessionId },
+      select: { id: true, name: true, type: true },
+    });
 
-      // Retrieve relevant chunks
-      const retrieved = await (async () => {
-        if (selectedSources.length > 0) {
-          return prisma.$queryRawUnsafe<
-            Array<{
-              id: string;
-              content: string;
-              metadata: any;
-              sourceId: string;
-              score: number;
-            }>
-          >(
-            `SELECT id, content, metadata, "sourceId",
-                    (embedding <-> $2::vector) AS score
-             FROM "SourceChunk"
-             WHERE "sourceId" = ANY($1::text[])
-             ORDER BY embedding <-> $2::vector
-             LIMIT $3;`,
-            selectedSources,
-            `[${qVec.join(",")}]`,
-            topN
-          );
-        } else {
-          return prisma.$queryRawUnsafe<
-            Array<{
-              id: string;
-              content: string;
-              metadata: any;
-              sourceId: string;
-              score: number;
-            }>
-          >(
-            `SELECT id, content, metadata, "sourceId",
-                    (embedding <-> $2::vector) AS score
-             FROM "SourceChunk"
-             WHERE "sourceId" IN (
-               SELECT id FROM "Source" WHERE "sessionId" = $1
-             )
-             ORDER BY embedding <-> $2::vector
-             LIMIT $3;`,
-            sessionId,
-            `[${qVec.join(",")}]`,
-            topN
-          );
-        }
-      })();
+    // Retrieve relevant chunks
+    const retrieved = await (async () => {
+      if (selectedSources.length > 0) {
+        return prisma.$queryRawUnsafe<
+          Array<{
+            id: string;
+            content: string;
+            metadata: any;
+            sourceId: string;
+            score: number;
+          }>
+        >(
+          `SELECT id, content, metadata, "sourceId",
+                  (embedding <-> $2::vector) AS score
+           FROM "SourceChunk"
+           WHERE "sourceId" = ANY($1::text[])
+           ORDER BY embedding <-> $2::vector
+           LIMIT $3;`,
+          selectedSources,
+          `[${qVec.join(",")}]`,
+          topN
+        );
+      } else {
+        return prisma.$queryRawUnsafe<
+          Array<{
+            id: string;
+            content: string;
+            metadata: any;
+            sourceId: string;
+            score: number;
+          }>
+        >(
+          `SELECT id, content, metadata, "sourceId",
+                  (embedding <-> $2::vector) AS score
+           FROM "SourceChunk"
+           WHERE "sourceId" IN (
+             SELECT id FROM "Source" WHERE "sessionId" = $1
+           )
+           ORDER BY embedding <-> $2::vector
+           LIMIT $3;`,
+          sessionId,
+          `[${qVec.join(",")}]`,
+          topN
+        );
+      }
+    })();
 
-      // Step 3: Apply diversity filtering
-      const deduped: typeof retrieved = [];
-      const seen = new Set<string>();
-      const perSourceCount = new Map<string, number>();
-      const maxPerSourceFirstPass = 2;
+    // Deduplicate
+    const deduped: typeof retrieved = [];
+    const seen = new Set<string>();
+    const perSourceCount = new Map<string, number>();
+    const maxPerSourceFirstPass = 2;
 
-      // First pass: limit per source
+    for (const r of retrieved) {
+      const key = hashText(r.content);
+      if (seen.has(key)) continue;
+      const cnt = perSourceCount.get(r.sourceId) || 0;
+      if (cnt < maxPerSourceFirstPass) {
+        deduped.push(r);
+        seen.add(key);
+        perSourceCount.set(r.sourceId, cnt + 1);
+      }
+      if (deduped.length >= topK) break;
+    }
+
+    if (deduped.length < topK) {
       for (const r of retrieved) {
+        if (deduped.length >= topK) break;
         const key = hashText(r.content);
         if (seen.has(key)) continue;
-        const cnt = perSourceCount.get(r.sourceId) || 0;
-        if (cnt < maxPerSourceFirstPass) {
-          deduped.push(r);
-          seen.add(key);
-          perSourceCount.set(r.sourceId, cnt + 1);
+        deduped.push(r);
+        seen.add(key);
+      }
+    }
+
+    // Branching
+    if (deduped.length > 0) {
+      // RAG branch
+      const context = deduped
+        .map((r, i) => `(${i + 1}) ${r.content}`)
+        .join("\n\n");
+      const citations = deduped.map((r, i) => ({
+        id: r.id,
+        index: i + 1,
+        metadata: r.metadata || {},
+        sourceId: r.sourceId,
+      }));
+
+      await writer.write(
+        encoder.encode(
+          `data: ${JSON.stringify({ type: "generating", citations })}\n\n`
+        )
+      );
+
+      const stream = await groq.stream([
+        { role: "system", content: SYSTEM_RAG_QA },
+        { role: "user", content: userRagQA(context, query) },
+      ]);
+
+      let fullResponse = "";
+      for await (const chunk of stream) {
+        if (chunk.content) {
+          fullResponse += chunk.content;
+          await writer.write(
+            encoder.encode(
+              `data: ${JSON.stringify({
+                type: "token",
+                content: chunk.content,
+                userMessageId: userMsg.id,
+              })}\n\n`
+            )
+          );
         }
-        if (deduped.length >= topK) break;
       }
 
-      // Second pass: fill remaining slots if needed
-      if (deduped.length < topK) {
-        for (const r of retrieved) {
-          if (deduped.length >= topK) break;
-          const key = hashText(r.content);
-          if (seen.has(key)) continue;
-          deduped.push(r);
-          seen.add(key);
-        }
-      }
+      try {
+        const start = fullResponse.indexOf("{");
+        const end = fullResponse.lastIndexOf("}");
+        if (start !== -1 && end !== -1) {
+          const json = JSON.parse(fullResponse.slice(start, end + 1));
+          const enhancedAnswer = enhanceResponse(String(json?.answer || ""));
+          const finalFollowups =
+            Array.isArray(json?.followups) && json.followups.length > 0
+              ? json.followups.slice(0, 3)
+              : generateStrategicFollowups(query, context).slice(0, 3);
 
-      // Step 4: Handle no results case
-      if (deduped.length === 0) {
-        await writer.write(
-          encoder.encode(`data: ${JSON.stringify({ type: "thinking" })}\n\n`)
+          const assistantMsg = await prisma.chat.create({
+            data: {
+              sessionId,
+              role: "assistant",
+              message: enhancedAnswer,
+              citations,
+            },
+          });
+
+          await writer.write(
+            encoder.encode(
+              `data: ${JSON.stringify({
+                type: "complete",
+                chatMessage: assistantMsg,
+                citations,
+                followups: finalFollowups,
+              })}\n\n`
+            )
+          );
+        } else {
+          throw new Error("No valid JSON found in response");
+        }
+      } catch (err) {
+        console.error("RAG JSON parsing failed:", err);
+        const fallback = enhanceResponse(
+          fullResponse.trim() || "I had trouble processing the response."
         );
-
-        const sourceContext =
-          selectedSources.length > 0
-            ? `selected sources (${selectedSources
-                .map(
-                  (id) => allSources.find((s) => s.id === id)?.name || "Unknown"
-                )
-                .join(", ")})`
-            : `all ${allSources.length} sources`;
-
-        const noResultsPrompt = NO_RESULTS_COT_PROMPT.replace(
-          "{QUERY}",
-          query
-        ).replace("{SOURCE_CONTEXT}", sourceContext);
-
-        try {
-          const noResultsResponse = await groq.invoke([
-            { role: "system", content: SYSTEM_RAG_QA },
-            { role: "user", content: noResultsPrompt },
-          ]);
-
-          const responseText = noResultsResponse.content.toString();
-          let parsedResponse: { answer: string; followups: string[] };
-
-          try {
-            const start = responseText.indexOf("{");
-            const end = responseText.lastIndexOf("}");
-            if (start !== -1 && end !== -1) {
-              const json = JSON.parse(responseText.slice(start, end + 1));
-              parsedResponse = {
-                answer: enhanceResponse(
-                  json.answer ||
-                    "I couldn't find that information in your sources."
-                ),
-                followups: Array.isArray(json.followups) ? json.followups : [],
-              };
-            } else {
-              throw new Error("No JSON found");
-            }
-          } catch (parseError) {
-            console.error("Failed to parse no-results response:", parseError);
-            parsedResponse = {
-              answer: `I searched through ${sourceContext} but couldn't find specific information about "${query}". What else would you like to explore?`,
-              followups: [
-                "What topics are covered in my sources?",
-                "Can you summarize what information is available?",
-                "How can I add more relevant sources?",
-              ],
-            };
-          }
-
-          // Stream the no-results response naturally
-          const answerWords = parsedResponse.answer.split(" ");
-          let streamedAnswer = "";
-
-          for (const word of answerWords) {
-            streamedAnswer += word + " ";
-            await writer.write(
-              encoder.encode(
-                `data: ${JSON.stringify({
-                  type: "token",
-                  content: word + " ",
-                  userMessageId: userMsg.id,
-                })}\n\n`
-              )
-            );
-            // Small delay for natural streaming effect
-            await new Promise((resolve) => setTimeout(resolve, 30));
-          }
-
-          const assistantMsg = await prisma.chat.create({
-            data: {
-              sessionId,
-              role: "assistant",
-              message: parsedResponse.answer,
-              citations: [],
-            },
-          });
-
-          await writer.write(
-            encoder.encode(
-              `data: ${JSON.stringify({
-                type: "complete",
-                chatMessage: assistantMsg,
-                citations: [],
-                followups: parsedResponse.followups.slice(0, 3),
-              })}\n\n`
-            )
-          );
-        } catch (error) {
-          console.error("Error generating no-results response:", error);
-
-          const fallbackAnswer = `I searched through your sources but didn't find specific information about "${query}". Let me know what else I can help you explore!`;
-
-          const assistantMsg = await prisma.chat.create({
-            data: {
-              sessionId,
-              role: "assistant",
-              message: fallbackAnswer,
-              citations: [],
-            },
-          });
-
-          await writer.write(
-            encoder.encode(
-              `data: ${JSON.stringify({
-                type: "complete",
-                chatMessage: assistantMsg,
-                citations: [],
-                followups: [
-                  "What information is available in my sources?",
-                  "Can you help me with a different question?",
-                  "How do I add more relevant sources?",
-                ],
-              })}\n\n`
-            )
-          );
-        }
-      } else {
-        // Step 5: Build context and generate citations
-        const context = deduped
-          .map((r, i) => `(${i + 1}) ${r.content}`)
-          .join("\n\n");
-
-        citations = deduped.map((r, i) => ({
-          id: r.id,
-          index: i + 1,
-          metadata: r.metadata || {},
-          sourceId: r.sourceId,
-        }));
-
-        // Indicate we're generating the response
+        const assistantMsg = await prisma.chat.create({
+          data: { sessionId, role: "assistant", message: fallback, citations },
+        });
         await writer.write(
           encoder.encode(
             `data: ${JSON.stringify({
-              type: "generating",
+              type: "complete",
+              chatMessage: assistantMsg,
               citations,
+              followups: generateStrategicFollowups(query, "").slice(0, 3),
             })}\n\n`
           )
         );
+      }
+    } else {
+      // No results
+      if (selectedSources.length > 0) {
+        // No results in selected sources → no-results response
+        const noResultsPrompt = NO_RESULTS_COT_PROMPT.replace(
+          "{QUERY}",
+          query
+        ).replace(
+          "{SOURCE_CONTEXT}",
+          `selected sources (${selectedSources
+            .map((id) => allSources.find((s) => s.id === id)?.name || "Unknown")
+            .join(", ")})`
+        );
 
-        // Step 6: Stream RAG response
-        const stream = await groq.stream([
+        const noResultsResponse = await groq.invoke([
           { role: "system", content: SYSTEM_RAG_QA },
-          { role: "user", content: userRagQA(context, query) },
+          { role: "user", content: noResultsPrompt },
+        ]);
+
+        let parsed = {
+          answer: "I couldn’t find that in your sources.",
+          followups: [] as string[],
+        };
+        try {
+          const txt = noResultsResponse.content.toString();
+          const start = txt.indexOf("{");
+          const end = txt.lastIndexOf("}");
+          if (start !== -1 && end !== -1)
+            parsed = JSON.parse(txt.slice(start, end + 1));
+        } catch {}
+
+        const assistantMsg = await prisma.chat.create({
+          data: {
+            sessionId,
+            role: "assistant",
+            message: enhanceResponse(parsed.answer),
+            citations: [],
+          },
+        });
+
+        await writer.write(
+          encoder.encode(
+            `data: ${JSON.stringify({
+              type: "complete",
+              chatMessage: assistantMsg,
+              citations: [],
+              followups: parsed.followups.slice(0, 3),
+            })}\n\n`
+          )
+        );
+      } else {
+        // General fallback
+        const stream = await groq.stream([
+          { role: "system", content: SYSTEM_GENERAL },
+          { role: "user", content: query },
         ]);
 
         let fullResponse = "";
         for await (const chunk of stream) {
-          const content = chunk.content;
-          if (content) {
-            fullResponse += content;
+          if (chunk.content) {
+            fullResponse += chunk.content;
             await writer.write(
               encoder.encode(
                 `data: ${JSON.stringify({
                   type: "token",
-                  content,
+                  content: chunk.content,
                   userMessageId: userMsg.id,
                 })}\n\n`
               )
@@ -543,100 +521,35 @@ async function processStreamingQuery({
           }
         }
 
-        // Step 7: Parse and enhance the final response
-        try {
-          const start = fullResponse.indexOf("{");
-          const end = fullResponse.lastIndexOf("}");
+        const enhancedResponse = enhanceResponse(fullResponse.trim());
+        const assistantMsg = await prisma.chat.create({
+          data: {
+            sessionId,
+            role: "assistant",
+            message: enhancedResponse,
+            citations: [],
+          },
+        });
 
-          if (start !== -1 && end !== -1) {
-            const jsonStr = fullResponse.slice(start, end + 1);
-            const json = JSON.parse(jsonStr);
-
-            // Enhance the answer
-            const rawAnswer = String(json?.answer || "");
-            const enhancedAnswer = enhanceResponse(rawAnswer);
-
-            // Generate strategic follow-ups
-            let finalFollowups: string[] = [];
-
-            if (Array.isArray(json?.followups) && json.followups.length > 0) {
-              finalFollowups = json.followups.slice(0, 3);
-            } else {
-              // Generate strategic follow-ups based on query and context
-              finalFollowups = generateStrategicFollowups(query, context).slice(
-                0,
-                3
-              );
-            }
-
-            const assistantMsg = await prisma.chat.create({
-              data: {
-                sessionId,
-                role: "assistant",
-                message: enhancedAnswer,
-                citations: citations,
-              },
-            });
-
-            await writer.write(
-              encoder.encode(
-                `data: ${JSON.stringify({
-                  type: "complete",
-                  chatMessage: assistantMsg,
-                  citations,
-                  followups: finalFollowups,
-                })}\n\n`
-              )
-            );
-          } else {
-            throw new Error("No valid JSON found in response");
-          }
-        } catch (parseError) {
-          console.error("JSON parsing failed:", parseError);
-
-          // Fallback: use raw response enhanced
-          const enhancedFallback = enhanceResponse(
-            fullResponse.trim() ||
-              "I had trouble processing the response. Please try rephrasing your question."
-          );
-
-          const assistantMsg = await prisma.chat.create({
-            data: {
-              sessionId,
-              role: "assistant",
-              message: enhancedFallback,
-              citations: citations,
-            },
-          });
-
-          const strategicFollowups = generateStrategicFollowups(
-            query,
-            context
-          ).slice(0, 3);
-
-          await writer.write(
-            encoder.encode(
-              `data: ${JSON.stringify({
-                type: "complete",
-                chatMessage: assistantMsg,
-                citations: citations,
-                followups: strategicFollowups,
-              })}\n\n`
-            )
-          );
-        }
+        await writer.write(
+          encoder.encode(
+            `data: ${JSON.stringify({
+              type: "complete",
+              chatMessage: assistantMsg,
+              citations: [],
+              followups: generateStrategicFollowups(query, "").slice(0, 3),
+            })}\n\n`
+          )
+        );
       }
     }
   } catch (error) {
     console.error("[processStreamingQuery] error:", error);
-
-    // Send error response
     await writer.write(
       encoder.encode(
         `data: ${JSON.stringify({
           type: "error",
-          error:
-            "I encountered an issue while searching. Please try asking your question again.",
+          error: "I encountered an issue while searching. Please try again.",
         })}\n\n`
       )
     );
@@ -812,12 +725,7 @@ async function processNonStreamingQuery({
 
     // Store assistant response
     const assistant = await prisma.chat.create({
-      data: {
-        sessionId,
-        role: "assistant",
-        message: answer,
-        citations: citations,
-      },
+      data: { sessionId, role: "assistant", message: answer },
     });
 
     return NextResponse.json({
